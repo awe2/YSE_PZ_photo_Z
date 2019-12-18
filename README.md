@@ -8,6 +8,7 @@ Add 'YSE_App.data_ingest.Photo_Z.YSE' to settings.py file under Cron
 
 Install dependencies: Scikit-learn, and this: https://github.com/sciserver/SciScript-Python which has broken(???) pip install, but luckily the git manual install works fine for me
 
+grab the model from here: https://drive.google.com/drive/u/1/folders/1dl1SueUpUQ_2RcuevS_HaX6zRH9GGKUQ
 
 
 What I know needs fixing:
