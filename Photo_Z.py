@@ -1,19 +1,27 @@
 from django_cron import CronJobBase, Schedule
 from YSE_App.models.transient_models import *
-from YSE_App.common.utilities import GetSexigesimalString
-from YSE_App.common.alert import IsK2Pixel, SendTransientAlert
-from YSE_App.common.thacher_transient_search import thacher_transient_search
-from YSE_App.common.tess_obs import tess_obs
-from YSE_App.common.utilities import date_to_mjd
+#from YSE_App.common.utilities import GetSexigesimalString
+#from YSE_App.common.alert import IsK2Pixel, SendTransientAlert
+#from YSE_App.common.thacher_transient_search import thacher_transient_search
+#from YSE_App.common.tess_obs import tess_obs
+#from YSE_App.common.utilities import date_to_mjd
+#from YSE_App import *
+
+#from .models import *
+#from .serializers import *
 import datetime
 
 import numpy as np
-import pandas
+import pandas as pd
 import os
 import pickle
 
+import sys
+
 from sklearn.ensemble import RandomForestRegressor
-from SciServer import Authentication, CasJobs 
+from SciServer import Authentication, CasJobs
+
+#import last because something else uses 'Q'
 
 class YSE(CronJobBase):
 
@@ -22,7 +30,7 @@ class YSE(CronJobBase):
 	schedule = Schedule(run_every_mins=RUN_EVERY_MINS)
 	code = 'YSE_App.data_ingest.Photo_Z.YSE'
 
-	def do(self,user='awe2',password='StandardPassword',path_to_model='YSE_App\\data_ingest\\RF_model.sav'):
+	def do(self,user='awe2',password='StandardPassword',search=1,path_to_model='YSE_App\\data_ingest\\RF_model.sav'):
 		"""
 		Predicts photometric redshifts from RA and DEC points in SDSS
 
@@ -36,102 +44,90 @@ class YSE(CronJobBase):
 		predict the information from the model
 
 		return the predictions in the same order to the user
-		
-		Note: N <= 1000 because of CAS; could do this in batches over 1000
 
 		inputs:
 			Ra: list or array of len N, right ascensions of target galaxies in decimal degrees
 			Dec: list or array of len N, declination of target galaxies in decimal degrees
-			Search: float, arcmin tolerance to search for the object in SDSS Catalogue
-			model: str, filepath to saved model for prediction
+			search: float, arcmin tolerance to search for the object in SDSS Catalogue
+			path_to_model: str, filepath to saved model for prediction
 		
 		Returns:
 			predictions: array of len N, photometric redshift of input galaxy
 
 		"""
+		nowdate = datetime.datetime.utcnow() - datetime.timedelta(1)
+		from django.db.models import Q #HAS To Remain Here, I dunno why
+		print('Entered the photo_z cron')		
 		#save time b/c the other cron jobs print a time for completion
 		
-		#final will have something like:
-		#transient_list = Transients.objects.filter(photometric_redshift=None & tags.galactic_host=True)  
-		
-		#but for now lets do:
-		nowdate = datetime.datetime.utcnow() - datetime.timedelta(100)
-		transient_list = Transient.objects.filter(created_date__gt=nowdate)
-		#transient_list = Transients.objects.filter()
-		#print('Number of test transients:', len(transient_list))
-		RA=[]
+		transients = (Transient.objects.filter(Q(host__photo_z__isnull=True)))
+
+		#print('Number of test transients:', len(transients))
+		RA=[] #Needs to be list b/c don't know how many hosts are None
 		DEC=[]
-		#print('debug first for loop')
-		for transients in transient_list:
+		outer_mask = [] #create an integer index mask that we will place values into because some hosts dont have a RA and DEC assigned 
+
+		for i,transient_obj in enumerate(transients):
+			if transient_obj.host != None:
+				RA.append(transient_obj.host.ra)
+				DEC.append(transient_obj.host.dec)
+				outer_mask.append(i) #provides integer index mask
+
+		outer_mask = np.array(outer_mask) #make that an array
 		
-			RA.append(transients.RADecimalString()) #get list of RA and DEC that need
-			DEC.append(transients.DecDecimalString())
-		#print('exited for loop')
-		#print('how many RA and DEC?: ',len(RA),len(DEC))
-		
-		
-		#okay now were ready to continue as planned	
-		N=len(RA)
-		
-		#Check to make sure N < 1000; else we need to batch this job to CAS
-		#something
-		#for first pass lets just take first 1000 
-		if N > 1000:
-			RA = RA[0:999]
-			DEC = DEC[0:999]
-		N = len(RA)
-		
+		N_outer = len(transients) #gives size of returned array
+
 		Ra = np.array(RA)
 		Dec = np.array(DEC)
-		#print('test conditional, now how many are in N?',len(RA),N)
-		#print(RA[0],DEC[0])
-		#First take RA and DEC and get u,g,r,i,z
-		hold=[]
-		#j=0 #to debug
-		for val in range(N): #if this works, maybe find a way to vectorize?
-			#if j == 0:
-				#print('entered second for loop')
-				#print(str(val))
-				#print(str(Ra[val]))
-				#print(str(Dec[val]))
-				#print('({},{},{}),|'.format(str(val),str(Ra[val]),str(Dec[val])))
-			string = '({},{},{}),|'.format(str(val),str(Ra[val]),str(Dec[val]))
-			#if j == 0:
-			#	print(string)
-			hold.append(string)
-			#if j ==0:
-			#	print(hold)
-				j=1
-		#print('exited second for loop')
-		#print('length of held strings: ', len(hold))
-		sql = "CREATE TABLE #UPLOAD(|id INT PRIMARY KEY,|up_ra FLOAT,|up_dec FLOAT|)|INSERT INTO #UPLOAD|   VALUES|"
-		for data in hold:
-			sql = sql + data
-		#there is a comma that needs to be deleted from the last entry for syntax to work
-		sql = sql[0:(len(sql)-2)] + '|'
-		#append the rest to it
-		sql = sql + "SELECT|p.u,p.g,p.r,p.i,p.z|FROM #UPLOAD as U|OUTER APPLY dbo.fGetNearestObjEq((U.up_ra),(U.up_dec),1) as N|LEFT JOIN Galaxy AS p ON N.objid=p.objid"
-		#change all | to new line
-		sql = sql.replace('|','\n')
-		#print('successfully built sql query')
-		Authentication.login(user,password)
-		#print('successfully used authentication')
-		job = CasJobs.executeQuery(sql,'DR15','pandas')
-		#print('activated CAS') 
-		#job is a pandas dataframe with ra,dec and u,g,r,i,z; First thing we can do is append new rows that are the colors
-		job['u-g']= job['u'].values - job['g'].values
-		job['g-r']= job['g'].values - job['r'].values
-		job['r-i']= job['r'].values - job['i'].values
-		job['i-z']= job['i'].values - job['z'].values
-		job['u_over_z']= job['u'].values / job['z'].values
+
+		N = len(Ra)#gives size of query array
+		Q = N//1000#decompose the length of transients needing classification
+
+		if N%1000 != 0: 
+			Q=Q+1 #catch remainder and start a new batch
+		total_job = [] #store all pandas job dataframes
+		for j in range(Q): #iterate over batches
+			if j == (Q-1):
+				Ra_batch = Ra[j*1000:((j+1)*1000 + N%1000)] #grab batch remainder
+				Dec_batch = Dec[j*1000:((j+1)*1000 + N%1000)]
+			else:
+				Ra_batch = Ra[j*1000:(j+1)*1000] #other wise grab batch of 1000
+				Dec_batch = Dec[j*1000:(j+1)*1000]
+
+			hold=[] #a list for holding the strings that I want to place into an sql query
+			for val in range(len(Ra_batch)):
+				string = '({},{},{}),|'.format(str(val),str(Ra[val]),str(Dec[val]))
+				hold.append(string)
+			
+			#Now construct the full query
+			sql = "CREATE TABLE #UPLOAD(|id INT PRIMARY KEY,|up_ra FLOAT,|up_dec FLOAT|)|INSERT INTO #UPLOAD|   VALUES|"
+			for data in hold:
+				sql = sql + data
+			#there is a comma that needs to be deleted from the last entry for syntax to work
+			sql = sql[0:(len(sql)-2)] + '|'
+			#append the rest to it
+			sql = sql + "SELECT|p.u,p.g,p.r,p.i,p.z|FROM #UPLOAD as U|OUTER APPLY dbo.fGetNearestObjEq((U.up_ra),(U.up_dec),{}) as N|LEFT JOIN Galaxy AS p ON N.objid=p.objid".format(str(search))
+			#change all | to new line: when we change to Unix system will need to change this new line 
+			sql = sql.replace('|','\n')
+			#login, change to some other credentials later
+			Authentication.login('awe2','StandardPassword')
+			job = CasJobs.executeQuery(sql,'DR15','pandas') #this lines sends and retrieves the result
+			print('Query {} of {} complete'.format(j+1,Q))
+			job['u-g']= job['u'].values - job['g'].values
+			job['g-r']= job['g'].values - job['r'].values
+			job['r-i']= job['r'].values - job['i'].values
+			job['i-z']= job['i'].values - job['z'].values
+			job['u_over_z']= job['u'].values / job['z'].values
+			total_job.append(job)
+		#print('left the query loop')
+		query_result = pd.concat(total_job)
 		#now feed to a RF model for prediction
-		X = job.values
-		#print('shape of test array: ', np.shape(X))
+		X = query_result.values
+		#load the model, will need to change the path later
 		model = pickle.load(open(path_to_model, 'rb'))
-		#print('loaded model')
 		#Need to deal with NANs now since many objects are outside the SDSS footprint, later models will learn to deal with this
 		#ideas: need to retain a mask of where the nans are in the row
-		mask = np.invert((job.isna().any(1).values)) #true was inside SDSS footprint
+		mask = np.invert((query_result.isna().any(1).values)) #true was inside SDSS footprint
 		#also will want this mask in indices so we can insert the predicted data correctly
 		indices=[]
 		for i,val in enumerate(mask):
@@ -142,7 +138,18 @@ class YSE(CronJobBase):
 		return_me = np.ones(N)*np.nan
 		#now replace nan with the predictions in order
 		return_me[indices] = predictions
-		#print(return_me)
+		#something is wrong here!, line works inside a try statement but not outside. raises no error for some reason...?
+		return_me_outer = np.ones(N_outer) * np.nan
+		return_me_outer[outer_mask] = return_me
+		#print('debug: made it here')
 		print('time taken:', datetime.datetime.utcnow() - nowdate)
-		#and then probably something like Transients.photometrc_redshift = predictions
-		return(return_me)
+		print('uploading now')
+		for t,pz in zip(transients,return_me):
+			#print('1')
+			host = t.host
+			#print('2')
+			host.photo_z = pz
+			#print('3')
+			host.save()
+			#print('4')
+		print('time taken with upload:', datetime.datetime.utcnow() - nowdate)
